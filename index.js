@@ -15,10 +15,16 @@ const io = new Server(server, {
   },
 });
 
+const players = [];
+
 io.on("connection", (socket) => {
-  console.log("Socket connected");
   socket.on("send_message", (data) => {
     io.emit("receive_message", data);
+    players.push(data.playerName);
+  });
+
+  socket.on("get_data", (data) => {
+    io.emit("send_data", players);
   });
 });
 
