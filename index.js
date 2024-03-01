@@ -4,7 +4,6 @@ const http = require("http");
 const { Server } = require("socket.io");
 const cookieParser = require("cookie-parser");
 const cors = require("cors");
-const { log } = require("console");
 
 app.use(cors());
 
@@ -28,10 +27,11 @@ function generateRandomId() {
 const players = [];
 const rooms = {};
 const teams = [];
+const clickedDotUpdated = [];
 
 io.on("connection", (socket) => {
   socket.on("join_room", (data) => {
-    const { roomId, players, teamSize } = data;
+    const { roomId, teamSize } = data;
     if (!rooms[roomId]) {
       rooms[roomId] = [];
     }
@@ -46,21 +46,19 @@ io.on("connection", (socket) => {
       rooms[roomId].push({ id: teamId, players: teamPlayers });
     }
 
-    console.log({ teams });
-
     rooms[roomId].forEach((team) => {
       const teamId = team.id;
       const teamPlayers = team.players;
       teamPlayers.forEach((p) => {
+        p.isRoomCreated = true;
         const socketId = p.socketId;
-        const data = { teamId };
-        io.to(p.socketId).emit("waiting", data);
         const targetSocket = io.of("/").sockets.get(p.socketId);
         if (targetSocket) {
           targetSocket.join(roomId);
           targetSocket.join(teamId);
         }
-        io.to(roomId).to(teamId).to(p.socketId).emit("room_users", {
+        io.to(roomId).to(teamId).emit("room_users", {
+          id: p.id,
           roomId,
           teamId,
           socketId,
@@ -70,28 +68,71 @@ io.on("connection", (socket) => {
     });
   });
 
-  // const cookies = socket.handshake.headers.cookie;
-  // console.log("Cookies:", cookies);
+  socket.on("update_socket_connection", ({ oldId, newId }) => {
+    players.forEach((p) => {
+      if (p.socketId === oldId) {
+        p.socketId = newId;
+      }
+    });
+  });
+
   socket.on("add_player", (data) => {
     socket.emit("setCookie", { key: "randomRoom1234", value: data.name });
+    data.round1 = false;
+    data.round2 = false;
+    data.round3 = false;
+    data.round4 = false;
     io.emit("update_player_list", data);
     players.push(data);
   });
 
-  socket.on("get_data", (data) => {
-    io.emit("send_data", players);
+  socket.on("fetch_players", (data) => {
+    io.emit("set_players", players);
+    socket.emit("socket_connected", { id: socket.id });
+  });
+
+  socket.on("dot_clicked", ({ playerId, teamId, roomId, dotIndex, round }) => {
+    let data1 = clickedDotUpdated.find((obj) => obj.id === playerId);
+    console.log({ data1 });
+    if (data1 !== null && data1 !== undefined) {
+      data1["clicked_dots"][round].push(dotIndex);
+    } else {
+      const data = {
+        id: playerId,
+        clicked_dots: {
+          round1: [],
+          round2: [],
+          round3: [],
+          round4: [],
+        },
+      };
+      data["clicked_dots"][round].push(dotIndex);
+      clickedDotUpdated.push(data);
+      data1 = clickedDotUpdated.find((obj) => obj.id === playerId);
+    }
+    const newData = { playerId, dots: data1["clicked_dots"][round] };
+    io.to(roomId).to(teamId).emit("dot_clicked_update", newData);
   });
 
   socket.on("fetch_team_players", (data) => {
-    const { teamId, roomId } = data;
     let players;
+    const { teamId, roomId, round } = data;
+    socket.join(roomId);
+    socket.join(teamId);
     teams.forEach((team) => {
       if (team.roomId == roomId && team.id == teamId) {
         players = team.players;
       }
     });
-    io.emit("team_players", { roomId, teamId, players });
+    io.emit("team_players", {
+      roomId,
+      teamId,
+      players,
+      clickedDot: clickedDotUpdated,
+    });
   });
+
+  socket.on("move_turn_to_next_player", (data) => {});
 
   socket.on("disconnect", () => {
     for (const roomId in rooms) {

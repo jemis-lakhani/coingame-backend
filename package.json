@@ -1,7 +1,7 @@
 {
-  "name": "coingame-server",
+  "name": "coingame",
   "version": "1.0.0",
-  "description": "coingame",
+  "description": "coingame-backend",
   "main": "index.js",
   "scripts": {
     "start": "nodemon index.js",
