@@ -30,7 +30,7 @@ const teams = [];
 const clickedDotUpdated = [];
 
 io.on("connection", (socket) => {
-  socket.on("join_room", (data) => {
+  socket.on("start_game", (data) => {
     const { roomId, teamSize } = data;
     if (!rooms[roomId]) {
       rooms[roomId] = [];
@@ -57,7 +57,7 @@ io.on("connection", (socket) => {
           targetSocket.join(roomId);
           targetSocket.join(teamId);
         }
-        io.to(roomId).to(teamId).emit("room_users", {
+        io.to(roomId).to(teamId).emit("join_room", {
           id: p.id,
           roomId,
           teamId,
@@ -76,7 +76,7 @@ io.on("connection", (socket) => {
     });
   });
 
-  socket.on("add_player", (data) => {
+  socket.on("add_player_to_team", (data) => {
     socket.emit("setCookie", { key: "randomRoom1234", value: data.name });
     data.round1 = false;
     data.round2 = false;
@@ -84,34 +84,41 @@ io.on("connection", (socket) => {
     data.round4 = false;
     io.emit("update_player_list", data);
     players.push(data);
+
+    const clickedDotData = {
+      id: data?.id,
+      clicked_dots: {
+        round1: [],
+        round2: [],
+        round3: [],
+        round4: [],
+      },
+    };
+    clickedDotUpdated.push(clickedDotData);
   });
 
-  socket.on("fetch_players", (data) => {
-    io.emit("set_players", players);
-    socket.emit("socket_connected", { id: socket.id });
+  socket.on("fetch_waiting_room_players", (data) => {
+    io.emit("set_waiting_room_players", players);
+    socket.emit("update_socket_connection", { id: socket.id });
   });
 
   socket.on("dot_clicked", ({ playerId, teamId, roomId, dotIndex, round }) => {
-    let data1 = clickedDotUpdated.find((obj) => obj.id === playerId);
-    console.log({ data1 });
-    if (data1 !== null && data1 !== undefined) {
-      data1["clicked_dots"][round].push(dotIndex);
-    } else {
-      const data = {
-        id: playerId,
-        clicked_dots: {
-          round1: [],
-          round2: [],
-          round3: [],
-          round4: [],
-        },
-      };
-      data["clicked_dots"][round].push(dotIndex);
-      clickedDotUpdated.push(data);
-      data1 = clickedDotUpdated.find((obj) => obj.id === playerId);
+    let player = clickedDotUpdated.find((obj) => obj.id === playerId);
+    if (player !== null && player !== undefined) {
+      player["clicked_dots"][round].push(dotIndex);
     }
-    const newData = { playerId, dots: data1["clicked_dots"][round] };
-    io.to(roomId).to(teamId).emit("dot_clicked_update", newData);
+    const updatedData = { playerId, dots: player["clicked_dots"][round] };
+    io.to(roomId).to(teamId).emit("dot_clicked_update", updatedData);
+  });
+
+  socket.on("start_team_timer", ({ roomId, teamId }) => {
+    io.to(roomId).to(teamId).emit("team_timer_started");
+  });
+
+  socket.on("fetch_players_time", ({ playersTime, roomId, teamId }) => {
+    console.log({ playersTime });
+    console.log({ roomId });
+    io.to(roomId).to(teamId).emit("set_players_time", { playersTime });
   });
 
   socket.on("fetch_team_players", (data) => {
@@ -132,7 +139,35 @@ io.on("connection", (socket) => {
     });
   });
 
-  socket.on("move_turn_to_next_player", (data) => {});
+  socket.on(
+    "check_for_next_turn",
+    ({ playerId, roomId, teamId, round, batchSize }) => {
+      const currentIndex = clickedDotUpdated.findIndex(
+        (p) => p.id === playerId,
+      );
+      if (currentIndex !== -1) {
+        const currentPlayer = clickedDotUpdated[currentIndex];
+        const clickedDots = currentPlayer["clicked_dots"][round].length;
+        const taskCompleted = clickedDots > 0 && clickedDots % batchSize === 0;
+        if (taskCompleted) {
+          const player = players.find((p) => p.id === currentPlayer.id);
+          player.isCurrentPlayer = false;
+          player.round1 = true;
+          const nextIndex = (currentIndex + 1) % clickedDotUpdated.length;
+          const nextPlayer = clickedDotUpdated[nextIndex];
+          const nextPlayerUpdate = players.find((p) => p.id === nextPlayer.id);
+          nextPlayerUpdate.isCurrentPlayer = true;
+          io.to(roomId)
+            .to(teamId)
+            .emit("next_player_turn", {
+              isRoundCompleted: nextIndex === clickedDotUpdated.length - 1,
+              players,
+              clickedDot: clickedDotUpdated,
+            });
+        }
+      }
+    },
+  );
 
   socket.on("disconnect", () => {
     for (const roomId in rooms) {
