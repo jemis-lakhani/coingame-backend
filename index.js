@@ -25,6 +25,13 @@ function generateRandomId() {
   return Math.floor(Math.random() * (max - min + 1)) + min;
 }
 
+const NEXT_ROUND = {
+  round1: "round2",
+  round2: "round3",
+  round3: "round4",
+  round4: "round5",
+};
+
 const players = [];
 const rooms = {};
 const teams = [];
@@ -147,7 +154,7 @@ io.on("connection", (socket) => {
         if (player !== null && player !== undefined) {
           player["clicked_dots"][round].push(dotIndex);
         }
-        io.to(teamId).emit("dot_clicked_update", { teamData });
+        io.to(teamId).emit("dot_clicked_update", { teamData, playerId });
         const isNextEnabled = player["clicked_dots"][round].length >= batchSize;
         const isAllClicked = player["clicked_dots"][round].length >= 4;
         socket.emit("manage_next_turn", { isNextEnabled, isAllClicked });
@@ -155,93 +162,63 @@ io.on("connection", (socket) => {
     },
   );
 
-  socket.on("check_for_new_round", ({ round, teamId }) => {
-    const teamPlayers = players.filter((p) => p.teamId === parseInt(teamId));
-    teamPlayers.forEach((p, index) => {
-      p.startIndex = 0;
-      p.endIndex = index === 0 ? 4 : 0;
-      p.isCurrentPlayer = index === 0;
-      p[round] = false;
-    });
-    let batchSize = 4;
-    if (round === "round1") {
-      batchSize = 4;
-    } else if (round === "round2") {
-      batchSize = 2;
-    } else if (round === "round3") {
-      batchSize = 2;
-    } else if (round === "round4") {
-      batchSize = 1;
-    }
+  socket.on("check_for_new_round", ({ round, nextRound, teamId }) => {
+    resetPlayerStats(round, teamId);
     const clickedDots = clickedDotUpdated[teamId];
-    console.dir({ teamPlayers });
-    const data = { players, clickedDots, batchSize };
-    io.to(teamId).emit("start_new_round", data);
+    io.to(teamId).emit("start_new_round", { players, clickedDots, nextRound });
   });
 
   socket.on(
     "check_for_next_turn",
-    ({ playerId, roomId, teamId, round, batchSize }) => {
-      const currentTeam = clickedDotUpdated[teamId];
-      if (currentTeam) {
-        const currentIndex = currentTeam.findIndex(
-          (p) => p.playerId === playerId,
-        );
-        if (currentIndex !== -1) {
-          const currentPlayer = currentTeam[currentIndex];
+    ({ playerId, teamId, round, batchSize, totalBatchSize }) => {
+      const teamDotsData = clickedDotUpdated[teamId];
+      const teamPlayers = getTeamPlayers(teamId);
+      if (teamDotsData) {
+        const index = teamDotsData.findIndex((p) => p.playerId === playerId);
+        if (index !== -1) {
+          const currentPlayer = teamDotsData[index];
           const clickedDots = currentPlayer["clicked_dots"][round];
-          console.log({ clickedDots });
           currentPlayer["clicked_dots"][round].sort((a, b) => a - b);
           const dots = clickedDots.length;
-          const taskCompleted = dots >= batchSize;
-          if (taskCompleted) {
+          if (dots >= batchSize) {
             currentPlayer["clicked_dots"][round] =
               currentPlayer["clicked_dots"][round].slice(batchSize);
-            console.log(">>>> ", currentPlayer["clicked_dots"][round]);
-            const teamPlayers = players.filter(
-              (p) => p.teamId === parseInt(teamId),
-            );
-            const player = teamPlayers.find(
-              (p) => p.id === currentPlayer.playerId,
-            );
+            console.log(">>>", currentPlayer["clicked_dots"][round]);
+            const player = getPlayer(teamPlayers, currentPlayer.playerId);
             if (player) {
-              if (dots < 4) {
+              if (dots >= totalBatchSize) {
+                console.log("Round completed >>");
+                player.isCurrentPlayer = false;
+                player.startIndex = 0;
+                player.endIndex = 0;
+                player[round] = true;
+              } else {
                 const newEndIndex = Math.min(player.endIndex + batchSize, 4);
                 player.startIndex += batchSize;
                 player.endIndex = newEndIndex;
                 player.isCurrentPlayer = true;
-              } else {
-                player.isCurrentPlayer = false;
-                player.startIndex = 0;
-                player.endIndex = 0;
+                player[round] = false;
               }
               let isRoundCompleted = false;
               let isLastPlayer = false;
-              let completedDots = 0;
-              if (currentIndex + 1 === currentTeam.length) {
-                isRoundCompleted = dots === batchSize;
+              if (index + 1 === teamDotsData.length) {
+                isRoundCompleted = dots >= totalBatchSize;
                 isLastPlayer = true;
-                completedDots = dots;
               } else {
-                const nextIndex = (currentIndex + 1) % currentTeam.length;
-                const nextPlayerId = currentTeam[nextIndex]?.playerId;
-                const nextPlayer = teamPlayers.find(
-                  (p) => p.id === nextPlayerId,
-                );
+                const nextIndex = (index + 1) % teamDotsData.length;
+                const nextPlayerId = teamDotsData[nextIndex]?.playerId;
+                const nextPlayer = getPlayer(teamPlayers, nextPlayerId);
                 nextPlayer.isCurrentPlayer = true;
                 nextPlayer.endIndex += batchSize;
               }
-              const isAllClicked = dots >= 4;
-              socket.emit("manage_next_turn", {
-                isNextEnabled: false,
-                isAllClicked,
-              });
+              console.log({ teamPlayers });
               io.to(teamId).emit("next_player_turn", {
                 teamPlayers,
-                clickedDots: currentTeam,
                 isRoundCompleted,
                 isLastPlayer,
-                completedDots,
+                clickedDots: teamDotsData,
+                isNextEnabled:
+                  currentPlayer["clicked_dots"][round].length >= batchSize,
               });
             }
           }
@@ -261,6 +238,26 @@ io.on("connection", (socket) => {
     }
   });
 });
+
+const getTeamPlayers = (teamId) => {
+  const teamPlayers = players.filter((p) => p.teamId === parseInt(teamId));
+  return teamPlayers;
+};
+
+const getPlayer = (teamPlayers, playerId) => {
+  const player = teamPlayers.find((p) => p.id === playerId);
+  return player;
+};
+
+const resetPlayerStats = (round, teamId) => {
+  const teamPlayers = getTeamPlayers(teamId);
+  teamPlayers.forEach((p, index) => {
+    p.startIndex = 0;
+    p.endIndex = index === 0 ? 4 : 0;
+    p.isCurrentPlayer = index === 0;
+    p[round] = false;
+  });
+};
 
 server.listen(5000, () => {
   console.log("Server listening on port", 5000);
