@@ -4,7 +4,6 @@ const http = require("http");
 const { Server } = require("socket.io");
 const cookieParser = require("cookie-parser");
 const cors = require("cors");
-const { createSocket } = require("dgram");
 
 app.use(cors());
 
@@ -25,12 +24,7 @@ function generateRandomId() {
   return Math.floor(Math.random() * (max - min + 1)) + min;
 }
 
-const NEXT_ROUND = {
-  round1: "round2",
-  round2: "round3",
-  round3: "round4",
-  round4: "round5",
-};
+const CLICKED = "clicked_dots";
 
 const players = [];
 const rooms = {};
@@ -110,6 +104,8 @@ io.on("connection", (socket) => {
     data.round2 = false;
     data.round3 = false;
     data.round4 = false;
+    data.count = 0;
+    data.isTimerStarted = false;
     io.emit("update_player_list", data);
     players.push(data);
   });
@@ -117,14 +113,6 @@ io.on("connection", (socket) => {
   socket.on("fetch_waiting_room_players", (data) => {
     io.emit("set_waiting_room_players", players);
     socket.emit("update_socket_connection", { id: socket.id });
-  });
-
-  socket.on("start_team_timer", ({ roomId, teamId }) => {
-    io.to(teamId).emit("team_timer_started");
-  });
-
-  socket.on("fetch_players_time", ({ playersTime, roomId, teamId }) => {
-    io.to(teamId).emit("set_players_time", { playersTime });
   });
 
   socket.on("fetch_team_players", (data) => {
@@ -145,80 +133,101 @@ io.on("connection", (socket) => {
     });
   });
 
+  socket.on("fetch_players_time", ({ playersTime, teamId }) => {
+    io.to(teamId).emit("set_players_time", { playersTime });
+  });
+
   socket.on(
     "dot_clicked",
-    ({ playerId, teamId, roomId, dotIndex, round, batchSize }) => {
+    ({ playerId, teamId, dotIndex, round, batchSize, totalSize }) => {
       const teamData = clickedDotUpdated[teamId];
       if (teamData) {
-        let player = teamData.find((obj) => obj.playerId === playerId);
-        if (player !== null && player !== undefined) {
-          player["clicked_dots"][round].push(dotIndex);
+        let dotsData = teamData.find((obj) => obj.playerId === playerId);
+        if (dotsData !== null && dotsData !== undefined) {
+          dotsData[CLICKED][round].push(dotIndex);
         }
-        io.to(teamId).emit("dot_clicked_update", { teamData, playerId });
-        const isNextEnabled = player["clicked_dots"][round].length >= batchSize;
-        const isAllClicked = player["clicked_dots"][round].length >= 4;
-        socket.emit("manage_next_turn", { isNextEnabled, isAllClicked });
+        io.to(teamId).emit("dot_clicked_update", { teamData });
+
+        const teamPlayers = getTeamPlayers(teamId);
+        const player = getPlayer(teamPlayers, playerId);
+        const clickedCount = dotsData[CLICKED][round].length;
+        const isNextEnabled = clickedCount >= batchSize;
+        const isAllClicked = clickedCount + player.count >= totalSize;
+
+        if (!player.isTimerStarted) {
+          player.isTimerStarted = true;
+          managePlayerTimer(true, false);
+          manageTeamTimer(teamId, true, false, false);
+        }
+        if (isAllClicked) {
+          managePlayerTimer(false, false);
+        }
+        socket.emit("manage_next_turn", { isNextEnabled });
       }
     },
   );
 
   socket.on("check_for_new_round", ({ round, nextRound, teamId }) => {
     resetPlayerStats(round, teamId);
+    resetTimers(teamId);
     const clickedDots = clickedDotUpdated[teamId];
     io.to(teamId).emit("start_new_round", { players, clickedDots, nextRound });
   });
 
   socket.on(
     "check_for_next_turn",
-    ({ playerId, teamId, round, batchSize, totalBatchSize }) => {
+    ({ playerId, teamId, round, batchSize, totalSize }) => {
       const teamDotsData = clickedDotUpdated[teamId];
       const teamPlayers = getTeamPlayers(teamId);
       if (teamDotsData) {
         const index = teamDotsData.findIndex((p) => p.playerId === playerId);
         if (index !== -1) {
-          const currentPlayer = teamDotsData[index];
-          const clickedDots = currentPlayer["clicked_dots"][round];
-          currentPlayer["clicked_dots"][round].sort((a, b) => a - b);
-          const dots = clickedDots.length;
-          if (dots >= batchSize) {
-            currentPlayer["clicked_dots"][round] =
-              currentPlayer["clicked_dots"][round].slice(batchSize);
-            console.log(">>>", currentPlayer["clicked_dots"][round]);
-            const player = getPlayer(teamPlayers, currentPlayer.playerId);
+          const dotsData = teamDotsData[index];
+          const isLastPlayer = index + 1 === teamDotsData.length;
+          const clickedDots = dotsData[CLICKED][round];
+          if (clickedDots.length >= batchSize) {
+            dotsData[CLICKED][round].sort((a, b) => a - b);
+            dotsData[CLICKED][round] =
+              dotsData[CLICKED][round].slice(batchSize);
+
+            const player = getPlayer(teamPlayers, dotsData.playerId);
             if (player) {
-              if (dots >= totalBatchSize) {
-                console.log("Round completed >>");
+              // Manage player stats
+              player.count += batchSize;
+              if (player.endIndex - player.startIndex === batchSize) {
+                player.startIndex = player.endIndex;
                 player.isCurrentPlayer = false;
-                player.startIndex = 0;
-                player.endIndex = 0;
-                player[round] = true;
               } else {
-                const newEndIndex = Math.min(player.endIndex + batchSize, 4);
                 player.startIndex += batchSize;
-                player.endIndex = newEndIndex;
                 player.isCurrentPlayer = true;
-                player[round] = false;
               }
-              let isRoundCompleted = false;
-              let isLastPlayer = false;
-              if (index + 1 === teamDotsData.length) {
-                isRoundCompleted = dots >= totalBatchSize;
-                isLastPlayer = true;
-              } else {
+              if (!isLastPlayer) {
                 const nextIndex = (index + 1) % teamDotsData.length;
                 const nextPlayerId = teamDotsData[nextIndex]?.playerId;
                 const nextPlayer = getPlayer(teamPlayers, nextPlayerId);
                 nextPlayer.isCurrentPlayer = true;
                 nextPlayer.endIndex += batchSize;
               }
-              console.log({ teamPlayers });
+
+              // If round completed => stop team timer
+              const roundCompleted = isLastPlayer && player.count >= totalSize;
+              if (isLastPlayer) {
+                if (player.count === batchSize) {
+                  manageTeamTimer(teamId, true, true, false);
+                }
+                if (roundCompleted) {
+                  manageTeamTimer(teamId, false, false, false);
+                }
+              }
+
+              const isNextEnabled =
+                dotsData[CLICKED][round].length >= batchSize;
+              socket.emit("manage_next_turn", { isNextEnabled });
               io.to(teamId).emit("next_player_turn", {
                 teamPlayers,
-                isRoundCompleted,
-                isLastPlayer,
                 clickedDots: teamDotsData,
-                isNextEnabled:
-                  currentPlayer["clicked_dots"][round].length >= batchSize,
+                roundCompleted,
+                isLastPlayer,
               });
             }
           }
@@ -226,6 +235,36 @@ io.on("connection", (socket) => {
       }
     },
   );
+
+  // Reset players/team timers
+  const resetTimers = (teamId) => {
+    io.to(teamId).emit("manage_player_timer", {
+      start: false,
+      isReset: true,
+    });
+    io.to(teamId).emit("manage_team_timer", {
+      start: false,
+      isFirstValue: false,
+      isReset: true,
+    });
+  };
+
+  // Manage Team Timers
+  const manageTeamTimer = (teamId, start, isFirstValue, isReset) => {
+    io.to(teamId).emit("manage_team_timer", {
+      start,
+      isFirstValue,
+      isReset,
+    });
+  };
+
+  // Manage Player Timer
+  const managePlayerTimer = (start, isReset) => {
+    socket.emit("manage_player_timer", {
+      start,
+      isReset,
+    });
+  };
 
   socket.on("disconnect", () => {
     for (const roomId in rooms) {
@@ -256,6 +295,8 @@ const resetPlayerStats = (round, teamId) => {
     p.endIndex = index === 0 ? 4 : 0;
     p.isCurrentPlayer = index === 0;
     p[round] = false;
+    p.count = 0;
+    p.isTimerStarted = false;
   });
 };
 
