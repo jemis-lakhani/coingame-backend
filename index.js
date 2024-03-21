@@ -55,6 +55,7 @@ io.on("connection", (socket) => {
         p.isRoomCreated = true;
         p.teamId = teamId;
         p.isCurrentPlayer = index === 0;
+        p.isFirstPlayer = index === 0;
         p.startIndex = 0;
         p.endIndex = index === 0 ? 4 : 0;
         const socketId = p.socketId;
@@ -106,6 +107,7 @@ io.on("connection", (socket) => {
     data.round4 = false;
     data.count = 0;
     data.isTimerStarted = false;
+    data.isFirstPlayer = false;
     io.emit("update_player_list", data);
     players.push(data);
   });
@@ -167,12 +169,21 @@ io.on("connection", (socket) => {
     },
   );
 
-  socket.on("check_for_new_round", ({ round, nextRound, teamId }) => {
-    resetPlayerStats(round, teamId);
-    resetTimers(teamId);
-    const clickedDots = clickedDotUpdated[teamId];
-    io.to(teamId).emit("start_new_round", { players, clickedDots, nextRound });
-  });
+  socket.on(
+    "check_for_new_round",
+    ({ round, nextRound, teamId, batchSize }) => {
+      resetPlayerStats(round, teamId);
+      resetTimers(teamId);
+      const clickedDots = clickedDotUpdated[teamId];
+      const players = getTeamPlayers(teamId);
+      io.to(teamId).emit("start_new_round", {
+        players,
+        clickedDots,
+        nextRound,
+        batchSize,
+      });
+    },
+  );
 
   socket.on(
     "check_for_next_turn",
