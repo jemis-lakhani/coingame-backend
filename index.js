@@ -4,11 +4,14 @@ const http = require("http");
 const { Server } = require("socket.io");
 const cookieParser = require("cookie-parser");
 const cors = require("cors");
+require("dotenv").config();
 
 app.use(cors());
 app.use(cookieParser());
 
 const server = http.createServer(app);
+
+console.log(process.env.FRONTEND_URL);
 
 const io = new Server(server, {
   cors: {
