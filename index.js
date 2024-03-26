@@ -6,6 +6,7 @@ const cookieParser = require("cookie-parser");
 const cors = require("cors");
 
 app.use(cors());
+app.use(cookieParser());
 
 const server = http.createServer(app);
 
@@ -16,8 +17,6 @@ const io = new Server(server, {
   },
 });
 
-app.use(cookieParser());
-
 function generateRandomId() {
   const min = 100000;
   const max = 999999;
@@ -26,17 +25,35 @@ function generateRandomId() {
 
 const CLICKED = "clicked_dots";
 
+// All players
 const players = [];
-const rooms = {};
+// Teams
 const teams = [];
+// Clicked dot update based on team players
 const clickedDotUpdated = {};
 
 io.on("connection", (socket) => {
+  socket.on("add_player_to_team", (data) => {
+    socket.emit("setCookie", { key: "randomRoom1234", value: data.name });
+    data.round1 = false;
+    data.round2 = false;
+    data.round3 = false;
+    data.round4 = false;
+    io.emit("update_player_list", data);
+    players.push(data);
+  });
+
+  // Update socket connection when user refresh the waiting room page
+  socket.on("update_socket_connection", ({ oldId, newId }) => {
+    players.forEach((p) => {
+      if (p.socketId === oldId) {
+        p.socketId = newId;
+      }
+    });
+  });
+
   socket.on("start_game", (data) => {
     const { roomId, teamSize } = data;
-    if (!rooms[roomId]) {
-      rooms[roomId] = [];
-    }
 
     const numTeams = Math.ceil(players.length / teamSize);
     for (let i = 0; i < numTeams; i++) {
@@ -45,19 +62,13 @@ io.on("connection", (socket) => {
       const endIndex = Math.min((i + 1) * teamSize, players.length);
       const teamPlayers = players.slice(startIndex, endIndex);
       teams.push({ id: teamId, roomId, players: teamPlayers });
-      rooms[roomId].push({ id: teamId, players: teamPlayers });
     }
 
-    rooms[roomId].forEach((team) => {
+    teams.forEach((team) => {
       const teamId = team.id;
       const teamPlayers = team.players;
       teamPlayers.forEach((p, index) => {
-        p.isRoomCreated = true;
-        p.teamId = teamId;
-        p.isCurrentPlayer = index === 0;
-        p.isFirstPlayer = index === 0;
-        p.startIndex = 0;
-        p.endIndex = index === 0 ? 4 : 0;
+        resetPlayerStats(p, index);
         const socketId = p.socketId;
         const targetSocket = io.of("/").sockets.get(p.socketId);
         if (targetSocket) {
@@ -87,29 +98,37 @@ io.on("connection", (socket) => {
           socketId,
           players: teamPlayers,
         });
+        socket.emit("game_started", {});
       });
     });
   });
 
-  socket.on("update_socket_connection", ({ oldId, newId }) => {
-    players.forEach((p) => {
-      if (p.socketId === oldId) {
-        p.socketId = newId;
-      }
+  socket.on("reset_game", ({ roomId }) => {
+    resetClickedDot();
+    teams.forEach((team) => {
+      const teamId = team.id;
+      const teamPlayers = team.players;
+      teamPlayers.forEach((p, index) => {
+        resetPlayerStats(p, index);
+        const clickedDotData = {
+          playerId: p.id,
+          teamId: teamId,
+          clicked_dots: {
+            round1: [],
+            round2: [],
+            round3: [],
+            round4: [],
+          },
+        };
+        if (clickedDotUpdated[teamId] == null) {
+          clickedDotUpdated[teamId] = [];
+        }
+        clickedDotUpdated[teamId].push(clickedDotData);
+      });
     });
-  });
-
-  socket.on("add_player_to_team", (data) => {
-    socket.emit("setCookie", { key: "randomRoom1234", value: data.name });
-    data.round1 = false;
-    data.round2 = false;
-    data.round3 = false;
-    data.round4 = false;
-    data.count = 0;
-    data.isTimerStarted = false;
-    data.isFirstPlayer = false;
-    io.emit("update_player_list", data);
-    players.push(data);
+    io.emit("restart_game", {});
+    console.dir({ clickedDotUpdated });
+    console.dir({ players });
   });
 
   socket.on("fetch_waiting_room_players", (data) => {
@@ -119,8 +138,7 @@ io.on("connection", (socket) => {
 
   socket.on("fetch_team_players", (data) => {
     let players;
-    const { teamId, roomId, round } = data;
-    socket.join(roomId);
+    const { teamId, roomId } = data;
     socket.join(teamId);
     teams.forEach((team) => {
       if (team.roomId == roomId && team.id == teamId) {
@@ -132,6 +150,7 @@ io.on("connection", (socket) => {
       teamId,
       players,
       clickedDots: clickedDotUpdated[teamId],
+      isResetGame: false,
     });
   });
 
@@ -170,22 +189,6 @@ io.on("connection", (socket) => {
   );
 
   socket.on(
-    "check_for_new_round",
-    ({ round, nextRound, teamId, batchSize }) => {
-      resetPlayerStats(round, teamId);
-      resetTimers(teamId);
-      const clickedDots = clickedDotUpdated[teamId];
-      const players = getTeamPlayers(teamId);
-      io.to(teamId).emit("start_new_round", {
-        players,
-        clickedDots,
-        nextRound,
-        batchSize,
-      });
-    },
-  );
-
-  socket.on(
     "check_for_next_turn",
     ({ playerId, teamId, round, batchSize, totalSize }) => {
       const teamDotsData = clickedDotUpdated[teamId];
@@ -201,7 +204,7 @@ io.on("connection", (socket) => {
             dotsData[CLICKED][round] =
               dotsData[CLICKED][round].slice(batchSize);
 
-            const player = getPlayer(teamPlayers, dotsData.playerId);
+            const player = getPlayer(teamPlayers, playerId);
             if (player) {
               // Manage player stats
               player.count += batchSize;
@@ -247,6 +250,22 @@ io.on("connection", (socket) => {
     },
   );
 
+  socket.on(
+    "check_for_new_round",
+    ({ round, nextRound, teamId, batchSize }) => {
+      resetTeamStats(round, teamId);
+      resetTimers(teamId);
+      const clickedDots = clickedDotUpdated[teamId];
+      const players = getTeamPlayers(teamId);
+      io.to(teamId).emit("start_new_round", {
+        players,
+        clickedDots,
+        nextRound,
+        batchSize,
+      });
+    },
+  );
+
   // Reset players/team timers
   const resetTimers = (teamId) => {
     io.to(teamId).emit("manage_player_timer", {
@@ -257,6 +276,13 @@ io.on("connection", (socket) => {
       start: false,
       isFirstValue: false,
       isReset: true,
+    });
+  };
+
+  // Reset clickedDot data
+  const resetClickedDot = () => {
+    Object.keys(clickedDotUpdated).forEach((key) => {
+      clickedDotUpdated[key] = [];
     });
   };
 
@@ -276,39 +302,46 @@ io.on("connection", (socket) => {
       isReset,
     });
   };
-
-  socket.on("disconnect", () => {
-    for (const roomId in rooms) {
-      const index = rooms[roomId].findIndex((user) => user.id === socket.id);
-      if (index !== -1) {
-        rooms[roomId].splice(index, 1);
-        io.to(roomId).emit("room_users", rooms[roomId]);
-        break;
-      }
-    }
-  });
 });
 
+// Get Team players
 const getTeamPlayers = (teamId) => {
-  const teamPlayers = players.filter((p) => p.teamId === parseInt(teamId));
-  return teamPlayers;
+  const team = teams.find((team) => team.id === parseInt(teamId));
+  return team?.players;
 };
 
+// Get Player
 const getPlayer = (teamPlayers, playerId) => {
   const player = teamPlayers.find((p) => p.id === playerId);
   return player;
 };
 
-const resetPlayerStats = (round, teamId) => {
+// Reset team stats
+const resetTeamStats = (round, teamId) => {
   const teamPlayers = getTeamPlayers(teamId);
   teamPlayers.forEach((p, index) => {
     p.startIndex = 0;
-    p.endIndex = index === 0 ? 4 : 0;
+    p.endIndex = index === 0 ? 20 : 0;
     p.isCurrentPlayer = index === 0;
     p[round] = false;
     p.count = 0;
     p.isTimerStarted = false;
   });
+};
+
+// Reset Player stats
+const resetPlayerStats = (player, index) => {
+  player.isRoomCreated = true;
+  player.count = 0;
+  player.isTimerStarted = false;
+  player.isFirstPlayer = index === 0;
+  player.isCurrentPlayer = index === 0;
+  player.startIndex = 0;
+  player.endIndex = index === 0 ? 20 : 0;
+  player.round1 = false;
+  player.round2 = false;
+  player.round3 = false;
+  player.round4 = false;
 };
 
 server.listen(5000, () => {
