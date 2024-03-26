@@ -11,8 +11,6 @@ app.use(cookieParser());
 
 const server = http.createServer(app);
 
-console.log(process.env.FRONTEND_URL);
-
 const io = new Server(server, {
   cors: {
     origin: process.env.FRONTEND_URL,
@@ -130,8 +128,6 @@ io.on("connection", (socket) => {
       });
     });
     io.emit("restart_game", {});
-    console.dir({ clickedDotUpdated });
-    console.dir({ players });
   });
 
   socket.on("fetch_waiting_room_players", (data) => {
