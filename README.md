@@ -48,15 +48,8 @@ npm start
 
 Backend will run on:
 ```bash
-👉 http://localhost:4000 (default)
+👉 http://localhost:5000 (default)
 👉 Socket.IO endpoint: /socket
-```
-
-4. Environment Variables
-
-Create a .env file if required:
-```bash
-PORT=4000
 ```
 
 ## 🔌 API / Socket Events
